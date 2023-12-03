@@ -1,5 +1,5 @@
 import { createRouter, createWebHistory } from 'vue-router';
-import { generateRoutes } from './objects';
+import generateRoutes from './objects/generateRoutes';
 
 let router = createRouter({
 	history: createWebHistory('/dashboard2/'),
@@ -14,6 +14,16 @@ let router = createRouter({
 			path: '/jobs/:id',
 			component: () => import('./pages/JobPage.vue'),
 			props: true
+		},
+		{
+			name: 'NewSite',
+			path: '/sites/new',
+			component: () => import('./pages/NewSite.vue')
+		},
+		{
+			name: 'NewBench',
+			path: '/benches/new',
+			component: () => import('./pages/NewBench.vue')
 		},
 		...generateRoutes()
 	]

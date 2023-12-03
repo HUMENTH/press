@@ -7,6 +7,7 @@ from typing import Dict, List
 from itertools import groupby
 from frappe.utils import fmt_money
 from frappe.core.utils import find
+from press.press.doctype.team.team import has_unsettled_invoices
 from press.utils import get_current_team
 from press.utils.billing import (
 	clear_setup_intent,
@@ -223,13 +224,21 @@ def create_payment_intent_for_micro_debit(payment_method_name):
 @frappe.whitelist()
 def create_payment_intent_for_buying_credits(amount):
 	team = get_current_team(True)
+	metadata = {"payment_for": "prepaid_credits"}
+
+	if team.currency == "INR":
+		gst_amount = amount * frappe.db.get_single_value("Press Settings", "gst_percentage")
+		amount += gst_amount
+		metadata.update({"gst": round(gst_amount, 2)})
+
+	amount = round(amount, 2)
 	stripe = get_stripe()
 	intent = stripe.PaymentIntent.create(
-		amount=amount * 100,
+		amount=int(amount * 100),
 		currency=team.currency.lower(),
 		customer=team.stripe_customer_id,
 		description="Prepaid Credits",
-		metadata={"payment_for": "prepaid_credits"},
+		metadata=metadata,
 	)
 	return {
 		"client_secret": intent["client_secret"],
@@ -310,10 +319,40 @@ def set_as_default(name):
 
 @frappe.whitelist()
 def remove_payment_method(name):
-	payment_method = frappe.get_doc(
-		"Stripe Payment Method", {"name": name, "team": get_current_team()}
-	)
+	team = get_current_team()
+	payment_method_count = frappe.db.count("Stripe Payment Method", {"team": team})
+
+	if has_unsettled_invoices(team) and payment_method_count == 1:
+		return "Unpaid Invoices"
+
+	payment_method = frappe.get_doc("Stripe Payment Method", {"name": name, "team": team})
 	payment_method.delete()
+
+
+@frappe.whitelist()
+def finalize_invoices():
+	unsettled_invoices = frappe.get_all(
+		"Invoice",
+		{"team": get_current_team(), "status": ("in", ("Draft", "Unpaid"))},
+		pluck="name",
+	)
+
+	for inv in unsettled_invoices:
+		inv_doc = frappe.get_doc("Invoice", inv)
+		inv_doc.finalize_invoice()
+
+
+@frappe.whitelist()
+def unpaid_invoices():
+	team = get_current_team()
+	invoices = frappe.get_all(
+		"Invoice",
+		{"team": team, "status": ("in", ["Draft", "Unpaid"]), "type": "Subscription"},
+		["name", "status", "period_end", "currency", "amount_due", "total"],
+		order_by="creation asc",
+	)
+
+	return invoices
 
 
 @frappe.whitelist()
@@ -506,12 +545,18 @@ def create_razorpay_order(amount):
 	client = get_razorpay_client()
 	team = get_current_team(get_doc=True)
 
+	if team.currency == "INR":
+		gst_amount = amount * frappe.db.get_single_value("Press Settings", "gst_percentage")
+		amount += gst_amount
+
+	amount = round(amount, 2)
 	data = {
-		"amount": amount * 100,
+		"amount": int(amount * 100),
 		"currency": team.currency,
 		"notes": {
 			"Description": "Order for Frappe Cloud Prepaid Credits",
 			"Team (Frappe Cloud ID)": team.name,
+			"gst": gst_amount if team.currency == "INR" else 0,
 		},
 	}
 	order = client.order.create(data=data)
@@ -566,7 +611,7 @@ def total_unpaid_amount():
 		frappe.get_all(
 			"Invoice",
 			{"status": "Unpaid", "team": get_current_team(), "type": "Subscription"},
-			["sum(total) as total"],
+			["sum(amount_due) as total"],
 			pluck="total",
 		)[0]
 		or 0

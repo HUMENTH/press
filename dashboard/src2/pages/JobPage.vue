@@ -12,6 +12,16 @@
 				<div class="flex items-center space-x-2">
 					<h2 class="text-lg font-medium text-gray-900">{{ job.job_type }}</h2>
 					<Badge :label="job.status" />
+					<Button
+						class="!ml-auto"
+						@click="$resources.job.reload()"
+						:loading="$resources.job.loading"
+					>
+						<template #prefix>
+							<i-lucide-refresh-ccw class="h-4 w-4" />
+						</template>
+						Refresh
+					</Button>
 				</div>
 				<div>
 					<div class="mt-4 grid grid-cols-5 gap-4">
@@ -30,7 +40,7 @@
 						<div>
 							<div class="text-sm font-medium text-gray-500">Duration</div>
 							<div class="mt-2 text-sm text-gray-900">
-								{{ formatDuration(job.duration) }}
+								{{ $format.duration(job.duration) }}
 							</div>
 						</div>
 						<div>
@@ -57,11 +67,12 @@
 </template>
 <script>
 import { FeatherIcon, Tooltip } from 'frappe-ui';
-import { formatDuration } from '../utils/format';
+import { duration } from '../utils/format';
+import { getObject } from '../objects';
 
 export default {
 	name: 'JobPage',
-	props: ['id', 'object'],
+	props: ['id', 'objectType'],
 	data() {
 		return {
 			isOpen: {}
@@ -76,7 +87,7 @@ export default {
 				transform(job) {
 					for (let step of job.steps) {
 						step.title = step.step_name;
-						step.duration = formatDuration(step.duration);
+						step.duration = duration(step.duration);
 						step.isOpen = false;
 					}
 					return job;
@@ -85,13 +96,32 @@ export default {
 		}
 	},
 	computed: {
+		object() {
+			return getObject(this.objectType);
+		},
 		job() {
 			return this.$resources.job.doc;
 		}
 	},
-	methods: {
-		formatDuration
+	components: { Tooltip, FeatherIcon },
+	mounted() {
+		this.$socket.on('agent_job_update', data => {
+			if (data.id === this.id) {
+				if (!this.$resources.job.loading) {
+					this.$resources.job.reload();
+				}
+			}
+		});
+		// reload job every minute, in case socket is not working
+		this.reloadInterval = setInterval(() => {
+			if (!this.$resources.job.loading) {
+				this.$resources.job.reload();
+			}
+		}, 1000 * 60);
 	},
-	components: { Tooltip, FeatherIcon }
+	beforeUnmount() {
+		this.$socket.off('agent_job_update');
+		clearInterval(this.reloadInterval);
+	}
 };
 </script>

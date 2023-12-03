@@ -523,6 +523,11 @@ class BaseServer(Document):
 		except Exception:
 			log_error("Set SSH Session Logging Exception", server=self.as_dict())
 
+	@property
+	def real_ram(self):
+		"""Ram detected by OS after h/w reservation"""
+		return 0.972 * self.ram - 218
+
 
 class Server(BaseServer):
 
@@ -983,6 +988,17 @@ class Server(BaseServer):
 					gunicorn_workers,
 				)
 				bench.save()
+
+	@frappe.whitelist()
+	def reset_sites_usage(self):
+		sites = frappe.get_all(
+			"Site",
+			filters={"server": self.name, "status": "Active"},
+			pluck="name",
+		)
+		for site_name in sites:
+			site = frappe.get_doc("Site", site_name)
+			site.reset_site_usage()
 
 
 def scale_workers():

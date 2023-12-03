@@ -15,7 +15,7 @@ from frappe.core.utils import find
 from frappe.frappeclient import FrappeClient
 from frappe.model.document import Document
 from frappe.model.naming import append_number_if_name_exists
-from frappe.utils import cint, cstr, get_datetime
+from frappe.utils import cint, cstr, get_datetime, flt
 from press.utils import unique
 from press.marketplace.doctype.marketplace_app_plan.marketplace_app_plan import (
 	MarketplaceAppPlan,
@@ -32,7 +32,10 @@ from frappe.utils.user import is_system_user
 from press.agent import Agent
 from press.api.site import check_dns
 from press.overrides import get_permission_query_conditions_for_doctype
-from press.press.doctype.marketplace_app.marketplace_app import marketplace_app_hook
+from press.press.doctype.marketplace_app.marketplace_app import (
+	get_plans_for_app,
+	marketplace_app_hook,
+)
 from press.press.doctype.plan.plan import get_plan_config
 from press.press.doctype.site_activity.site_activity import log_site_activity
 from press.press.doctype.site_analytics.site_analytics import create_site_analytics
@@ -41,16 +44,21 @@ from press.utils.dns import create_dns_record, _change_dns_record
 
 
 class Site(Document):
+	whitelisted_fields = ["ip", "status", "group", "notify_email", "team", "plan"]
+
 	@staticmethod
 	def get_list_query(query):
 		Site = frappe.qb.DocType("Site")
 		query = query.where(Site.status != "Archived").where(
-			Site.team == frappe.local.team.name
+			Site.team == frappe.local.team().name
 		)
 		return query
 
-	def get_doc(self):
-		return {"ip": self.ip}
+	def get_doc(self, doc):
+		from press.api.site import current_plan
+
+		doc["current_plan"] = current_plan(self.name)
+		return doc
 
 	def _get_site_name(self, subdomain: str):
 		"""Get full site domain name given subdomain."""
@@ -232,7 +240,7 @@ class Site(Document):
 		if plan:
 			is_free = frappe.db.get_value("Marketplace App Plan", plan, "is_free")
 			if not is_free:
-				if not frappe.local.team.can_install_paid_apps():
+				if not frappe.local.team().can_install_paid_apps():
 					frappe.throw(
 						"You cannot install a Paid app on Free Credits. Please buy credits before trying to install again."
 					)
@@ -274,11 +282,21 @@ class Site(Document):
 		).insert(ignore_if_duplicate=True)
 
 	def after_insert(self):
+		if hasattr(self, "subscription_plan") and self.subscription_plan:
+			# create subscription
+			self.create_subscription(self.subscription_plan)
+
 		# log activity
 		log_site_activity(self.name, "Create")
 		self._create_default_site_domain()
 		create_dns_record(self, record_name=self._get_site_name(self.subdomain))
 		self.create_agent_request()
+
+		if hasattr(self, "share_details_consent") and self.share_details_consent:
+			# create partner lead
+			frappe.get_doc(doctype="Partner Lead", team=self.team, site=self.name).insert(
+				ignore_permissions=True
+			)
 
 	def remove_dns_record(self, domain: Document, proxy_server: str, site: str):
 		"""Remove dns record of site pointing to proxy."""
@@ -304,9 +322,10 @@ class Site(Document):
 	def reinstall(self):
 		log_site_activity(self.name, "Reinstall")
 		agent = Agent(self.server)
-		agent.reinstall_site(self)
+		job = agent.reinstall_site(self)
 		self.status = "Pending"
 		self.save()
+		return job.name
 
 	@frappe.whitelist()
 	def migrate(self, skip_failing_patches=False):
@@ -377,18 +396,20 @@ class Site(Document):
 
 		log_site_activity(self.name, "Restore")
 		agent = Agent(self.server)
-		agent.restore_site(self, skip_failing_patches=skip_failing_patches)
+		job = agent.restore_site(self, skip_failing_patches=skip_failing_patches)
 		self.status = "Pending"
 		self.save()
+		return job.name
 
 	@frappe.whitelist()
-	def backup(self, with_files=False, offsite=False):
+	def backup(self, with_files=False, offsite=False, force=False):
 		return frappe.get_doc(
 			{
 				"doctype": "Site Backup",
 				"site": self.name,
 				"with_files": with_files,
 				"offsite": offsite,
+				"force": force,
 			}
 		).insert()
 
@@ -662,6 +683,12 @@ class Site(Document):
 
 		return delete_remote_backup_objects(sites_remote_files)
 
+	@frappe.whitelist()
+	def login_as_admin(self, reason=None):
+		sid = self.login(reason=reason)
+		return f"https://{self.host_name or self.name}/desk?sid={sid}"
+
+	@frappe.whitelist()
 	def login(self, reason=None):
 		log_site_activity(self.name, "Login as Administrator", reason=reason)
 		return self.get_login_sid()
@@ -883,6 +910,53 @@ class Site(Document):
 			self.save()
 
 	@frappe.whitelist()
+	def update_config(self, config=None):
+		"""Updates site.configuration, meant for dashboard and API users"""
+		if config is None:
+			return
+		# config = {"key1": value1, "key2": value2}
+		config = frappe.parse_json(config)
+
+		sanitized_config = {}
+		for key, value in config.items():
+			if key in get_client_blacklisted_keys():
+				continue
+
+			if isinstance(value, (dict, list)):
+				_type = "JSON"
+			elif isinstance(value, bool):
+				_type = "Boolean"
+			elif isinstance(value, (int, float)):
+				_type = "Number"
+			else:
+				_type = "String"
+
+			if frappe.db.exists("Site Config Key", key):
+				_type = frappe.db.get_value("Site Config Key", key, "type")
+			if _type == "Number":
+				value = flt(value)
+			elif _type == "Boolean":
+				value = bool(value)
+			elif _type == "JSON":
+				value = frappe.parse_json(value)
+			sanitized_config[key] = value
+
+		self.update_site_config(sanitized_config)
+
+	@frappe.whitelist()
+	def delete_config(self, key):
+		"""Deletes a key from site configuration, meant for dashboard and API users"""
+		if key in get_client_blacklisted_keys():
+			return
+
+		updated_config = []
+		for row in self.configuration:
+			if row.key != key and not row.internal:
+				updated_config.append({"key": row.key, "value": row.value, "type": row.type})
+
+		self.update_site_config(updated_config)
+
+	@frappe.whitelist()
 	def update_site_config(self, config=None):
 		"""Updates site.configuration, site.config and runs site.save which initiates an Agent Request
 		This checks for the blacklisted config keys via Frappe Validations, but not for internal usages.
@@ -967,6 +1041,14 @@ class Site(Document):
 			frappe.throw(
 				"Cannot change plan because you haven't added a card and not have enough balance"
 			)
+
+	# TODO: rename to change_plan and remove the need for ignore_card_setup param
+	@frappe.whitelist()
+	def set_plan(self, plan):
+		from press.api.site import validate_plan
+
+		validate_plan(self.server, plan)
+		self.change_plan(plan)
 
 	def change_plan(self, plan, ignore_card_setup=False):
 		self.can_change_plan(ignore_card_setup)
@@ -1403,6 +1485,31 @@ class Site(Document):
 	def disable_read_write(self):
 		self.enable_database_access("read_only")
 
+	@frappe.whitelist()
+	def get_actions(self):
+		return [
+			{
+				"action": "Restore from backup",
+				"description": "Restore your database from database, public and private files",
+				"button_label": "Restore",
+			},
+			{
+				"action": "Migrate site",
+				"description": "Run bench migrate command on your site",
+				"button_label": "Migrate",
+			},
+			{
+				"action": "Reset site",
+				"description": "Reset your site database to a clean state",
+				"button_label": "Reset",
+			},
+			{
+				"action": "Access site database",
+				"description": "Enable read/write access to your site database",
+				"button_label": "Enable Access",
+			},
+		]
+
 	@property
 	def pending_for_long(self) -> bool:
 		if not self.status == "Pending":
@@ -1454,11 +1561,12 @@ def process_new_site_job_update(job):
 	}[job.job_type]
 
 	first = job.status
-	second = frappe.get_all(
+	second = frappe.get_value(
 		"Agent Job",
-		fields=["status"],
-		filters={"job_type": ("in", other_job_types), "site": job.site},
-	)[0].status
+		{"job_type": ("in", other_job_types), "site": job.site},
+		"status",
+		for_update=True,
+	)
 
 	backup_tests = frappe.get_all(
 		"Backup Restoration Test", dict(test_site=job.site, status="Running"), pluck="name"
@@ -1501,6 +1609,7 @@ def get_remove_step_status(job):
 		"Agent Job Step",
 		{"step_name": remove_step_name, "agent_job": job.name},
 		"status",
+		for_update=True,
 	)
 
 
@@ -1513,8 +1622,7 @@ def process_archive_site_job_update(job):
 	}[job.job_type]
 
 	other_job = frappe.get_last_doc(
-		"Agent Job",
-		filters={"job_type": other_job_type, "site": job.site},
+		"Agent Job", filters={"job_type": other_job_type, "site": job.site}, for_update=True
 	)
 
 	first = get_remove_step_status(job)
@@ -1642,6 +1750,7 @@ def get_rename_step_status(job):
 		"Agent Job Step",
 		{"step_name": rename_step_name, "agent_job": job.name},
 		"status",
+		for_update=True,
 	)
 
 
@@ -1656,6 +1765,7 @@ def process_rename_site_job_update(job):
 	other_job = frappe.get_last_doc(
 		"Agent Job",
 		filters={"job_type": other_job_type, "site": job.site},
+		for_update=True,
 	)
 	first = get_rename_step_status(job)
 	second = get_rename_step_status(other_job)
@@ -1721,7 +1831,7 @@ def update_records_for_rename(job):
 	if new_name == job.site:  # idempotency
 		return
 
-	site = frappe.get_doc("Site", job.site)
+	site = frappe.get_doc("Site", job.site, for_update=True)
 	if site.host_name == job.site:
 		# Host name already updated in f server, no need to create another job
 		site._update_configuration({"host_name": f"https://{new_name}"})
@@ -1765,7 +1875,7 @@ def prepare_site(site: str, subdomain: str = None) -> Dict:
 	backup = frappe.get_doc("Site Backup", backups[0])
 
 	files = {
-		"config": "",  # not necessary for test sites
+		"config": backup.remote_config_file,
 		"database": backup.remote_database_file,
 		"public": backup.remote_public_file,
 		"private": backup.remote_private_file,
@@ -1789,24 +1899,21 @@ def options_for_new(group: str = None, selected_values=None) -> Dict:
 	selected_values = (
 		frappe.parse_json(selected_values) if selected_values else frappe._dict()
 	)
-	subdomain_available = None
+
 	versions = []
+	bench = None
 	apps = []
 	clusters = []
 
-	if selected_values.subdomain:
-		subdomain_available = not Site.exists(selected_values.subdomain, domain)
-
-	if subdomain_available:
-		versions = frappe.db.get_all(
-			"Frappe Version",
-			["name", "default", "status"],
-			{"public": True},
-			order_by="`default` desc, number desc",
-		)
-		for v in versions:
-			v.label = f"{v.name} ({v.status})"
-			v.value = v.name
+	versions = frappe.db.get_all(
+		"Frappe Version",
+		["name", "default", "status", "number"],
+		{"public": True},
+		order_by="number desc",
+	)
+	for v in versions:
+		v.label = v.name
+		v.value = v.name
 
 	if selected_values.version:
 		release_group = frappe.db.get_value(
@@ -1817,6 +1924,7 @@ def options_for_new(group: str = None, selected_values=None) -> Dict:
 				"public": 1,
 				"version": selected_values.version,
 			},
+			order_by="creation desc",
 			as_dict=1,
 		)
 		if release_group:
@@ -1826,7 +1934,7 @@ def options_for_new(group: str = None, selected_values=None) -> Dict:
 				order_by="creation desc",
 			)
 			if bench:
-				team = frappe.local.team.name
+				team = frappe.local.team().name
 				bench_apps = frappe.db.get_all("Bench App", {"parent": bench}, pluck="source")
 				app_sources = frappe.get_all(
 					"App Source",
@@ -1842,13 +1950,25 @@ def options_for_new(group: str = None, selected_values=None) -> Dict:
 						"app_title",
 						"frappe",
 					],
-					filters={"name": ("in", bench_apps)},
+					filters={"name": ("in", bench_apps), "frappe": 0},
 					or_filters={"public": True, "team": team},
 				)
 				for app in app_sources:
 					app.label = app.app_title
-					app.value = app.name
+					app.value = app.app
 				apps = sorted(app_sources, key=lambda x: bench_apps.index(x.name))
+				if apps:
+					marketplace_apps = frappe.db.get_all(
+						"Marketplace App",
+						fields=["title", "image", "description", "app", "route"],
+						filters={"app": ("in", [app.app for app in apps])},
+					)
+					for app in apps:
+						marketplace_details = find(marketplace_apps, lambda x: x.app == app.app)
+						if marketplace_details:
+							app.update(marketplace_details)
+							app.plans = get_plans_for_app(app.app, selected_values.version)
+
 				cluster_names = unique(
 					frappe.db.get_all(
 						"Bench",
@@ -1867,7 +1987,7 @@ def options_for_new(group: str = None, selected_values=None) -> Dict:
 
 	return {
 		"domain": domain,
-		"subdomain_available": subdomain_available,
+		"bench": bench,
 		"versions": versions,
 		"apps": apps,
 		"clusters": clusters,
