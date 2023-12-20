@@ -8,6 +8,7 @@ import { getTeam } from '../data/team';
 import router from '../router';
 import ChangeAppBranchDialog from '../components/bench/ChangeAppBranchDialog.vue';
 import AddAppDialog from '../components/bench/AddAppDialog.vue';
+import LucideAppWindow from '~icons/lucide/app-window.vue';
 
 export default {
 	doctype: 'Release Group',
@@ -36,7 +37,12 @@ export default {
 					else return 'Active';
 				}
 			},
-			{ label: 'Version', fieldname: 'version', width: 0.5 },
+			{
+				label: 'Version',
+				fieldname: 'version',
+				class: 'text-gray-600',
+				width: 0.5
+			},
 			{
 				label: 'Apps',
 				fieldname: 'app',
@@ -69,6 +75,73 @@ export default {
 		titleField: 'title',
 		route: '/benches/:name',
 		tabs: [
+			{
+				label: 'Sites',
+				icon: icon(LucideAppWindow),
+				route: 'sites',
+				type: 'list',
+				list: {
+					doctype: 'Site',
+					fields: [
+						'plan.plan_title as plan_title',
+						'group.title as group_title',
+						'group.version as version',
+						'cluster.image as cluster_image',
+						'cluster.title as cluster_title'
+					],
+					orderBy: 'creation desc',
+					filters: group => {
+						return { group: group.doc.name };
+					},
+					route(row) {
+						return {
+							name: 'Site Detail',
+							params: { name: row.name }
+						};
+					},
+					columns: [
+						{ label: 'Site', fieldname: 'name', width: 2 },
+						{ label: 'Status', fieldname: 'status', type: 'Badge', width: 1 },
+						{
+							label: 'Plan',
+							fieldname: 'plan',
+							width: 1,
+							format(value, row) {
+								return row.plan_title || value;
+							}
+						},
+						{
+							label: 'Cluster',
+							fieldname: 'cluster',
+							width: 1,
+							format(value, row) {
+								return row.cluster_title || value;
+							},
+							prefix(row) {
+								return h('img', {
+									src: row.cluster_image,
+									class: 'w-4 h-4',
+									alt: row.cluster_title
+								});
+							}
+						},
+						{
+							label: 'Bench',
+							fieldname: 'group',
+							width: 1,
+							format(value, row) {
+								return row.group_title || value;
+							}
+						},
+						{
+							label: 'Version',
+							fieldname: 'version',
+							width: 1,
+							class: 'text-gray-600'
+						}
+					]
+				}
+			},
 			{
 				label: 'Apps',
 				icon: icon('grid'),
@@ -113,19 +186,14 @@ export default {
 										placement: 'top',
 										class: 'rounded-full bg-gray-100 p-1'
 									},
-									[
+									() => [
 										h(
 											'a',
 											{
 												href: 'https://frappecloud.com/docs/faq/custom_apps#why-does-it-show-attention-required-next-to-my-custom-app',
 												target: '_blank'
 											},
-											[
-												h(FeatherIcon, {
-													class: 'h-[13px] w-[13px] text-gray-800',
-													name: 'help-circle'
-												})
-											]
+											[h(icon('help-circle', 'w-3 h-3'), {})]
 										)
 									]
 								);
@@ -343,8 +411,11 @@ export default {
 							label: 'Duration',
 							fieldname: 'duration',
 							class: 'text-gray-600',
-							format: duration,
-							width: '7rem'
+							width: '7rem',
+							format(value, row) {
+								if (row.job_id === 0) return;
+								return duration(value);
+							}
 						},
 						{
 							label: 'Start Time',
@@ -560,7 +631,6 @@ export default {
 					primaryAction({ listResource: clusters, documentResource: group }) {
 						return {
 							label: 'Add Region',
-							variant: 'solid',
 							slots: {
 								prefix: icon('plus')
 							},
@@ -595,7 +665,17 @@ export default {
 						bench.doc.deploy_information.update_available &&
 						['Awaiting Deploy', 'Active'].includes(bench.doc.status),
 					onClick() {
-						// TODO
+						let UpdateBenchDialog = defineAsyncComponent(() =>
+							import('../components/bench/UpdateBenchDialog.vue')
+						);
+						renderDialog(
+							h(UpdateBenchDialog, {
+								bench: bench.name,
+								onSuccess() {
+									bench.reload();
+								}
+							})
+						);
 					}
 				},
 				{

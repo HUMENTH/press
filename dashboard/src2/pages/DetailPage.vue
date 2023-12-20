@@ -1,18 +1,7 @@
 <template>
 	<Header class="sticky top-0 z-10 bg-white">
 		<div class="flex items-center space-x-2">
-			<Breadcrumbs
-				:items="[
-					{ label: object.list.title, route: object.list.route },
-					{
-						label: title,
-						route: {
-							name: `${object.doctype} Detail`,
-							params: { name: this.name }
-						}
-					}
-				]"
-			/>
+			<FBreadcrumbs :items="breadcrumbs" />
 			<Badge v-if="$resources.document?.doc && badge" v-bind="badge" />
 		</div>
 		<div class="flex items-center space-x-2" v-if="$resources.document?.doc">
@@ -37,7 +26,9 @@
 </template>
 
 <script>
-import { Tabs } from 'frappe-ui';
+import Header from '../components/Header.vue';
+import ActionButton from '../components/ActionButton.vue';
+import { Tabs, Breadcrumbs } from 'frappe-ui';
 import { getObject } from '../objects';
 
 export default {
@@ -53,7 +44,10 @@ export default {
 		}
 	},
 	components: {
-		FTabs: Tabs
+		Header,
+		ActionButton,
+		FTabs: Tabs,
+		FBreadcrumbs: Breadcrumbs
 	},
 	data() {
 		return {
@@ -124,6 +118,28 @@ export default {
 				});
 			}
 			return [];
+		},
+		breadcrumbs() {
+			let items = [
+				{ label: this.object.list.title, route: this.object.list.route },
+				{
+					label: this.title,
+					route: {
+						name: `${this.object.doctype} Detail`,
+						params: { name: this.name }
+					}
+				}
+			];
+			if (this.object.detail.breadcrumbs && this.$resources.document?.doc) {
+				let result = this.object.detail.breadcrumbs({
+					documentResource: this.$resources.document,
+					items
+				});
+				if (Array.isArray(result)) {
+					items = result;
+				}
+			}
+			return items;
 		}
 	}
 };

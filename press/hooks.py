@@ -18,6 +18,9 @@ version = app_version
 # include js, css files in header of desk.html
 # app_include_css = "/assets/press/css/press.css"
 # app_include_js = "/assets/press/js/press.js"
+app_include_js = [
+	"press.bundle.js",
+]
 
 # include js, css files in header of web template
 # web_include_css = "/assets/press/css/press.css"
@@ -208,7 +211,6 @@ scheduler_events = {
 		"0 4 * * *": [
 			"press.press.doctype.site.backups.cleanup_offsite",
 			"press.press.cleanup.unlink_remote_files_from_site",
-			"press.press.audit.check_unbilled_subscriptions",
 		],
 		"0 3 * * *": [
 			"press.press.doctype.drip_email.drip_email.send_drip_emails",
@@ -256,6 +258,10 @@ scheduler_events = {
 			"press.press.doctype.backup_restoration_test.backup_test.run_backup_restore_test"
 		],
 		"*/30 * 11 * *": ["press.press.doctype.team.suspend_sites.execute"],
+		"0 8 * * *": [
+			"press.press.audit.billing_audit",
+			"press.press.audit.partner_billing_audit",
+		],
 	},
 }
 

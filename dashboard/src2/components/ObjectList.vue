@@ -23,11 +23,10 @@
 				</TextInput>
 			</div>
 			<div class="ml-auto flex items-center space-x-2">
-				<Button @click="list.reload()" :loading="isLoading">
-					<template #prefix>
-						<i-lucide-refresh-ccw class="h-4 w-4" />
+				<Button label="Refresh" @click="list.reload()" :loading="isLoading">
+					<template #icon>
+						<FeatherIcon class="h-4 w-4" name="refresh-ccw" />
 					</template>
-					Refresh
 				</Button>
 				<ActionButton v-bind="primaryAction" :context="context" />
 			</div>
@@ -97,6 +96,8 @@
 	</div>
 </template>
 <script>
+import ActionButton from './ActionButton.vue';
+import ObjectListCell from './ObjectListCell.vue';
 import {
 	Dropdown,
 	ListView,
@@ -107,15 +108,17 @@ import {
 	ListRowItem,
 	ListSelectBanner,
 	TextInput,
-	FeatherIcon,
-	debounce
+	FeatherIcon
 } from 'frappe-ui';
-import { onDocUpdate } from 'frappe-ui/src/resources/realtime';
+
+let subscribed = {};
 
 export default {
 	name: 'ObjectList',
 	props: ['options'],
 	components: {
+		ActionButton,
+		ObjectListCell,
 		Dropdown,
 		ListView,
 		ListHeader,
@@ -129,6 +132,7 @@ export default {
 	},
 	data() {
 		return {
+			lastRefreshed: null,
 			searchQuery: ''
 		};
 	},
@@ -153,14 +157,44 @@ export default {
 				],
 				filters: this.options.filters || {},
 				orderBy: this.options.orderBy,
-				auto: true
+				auto: true,
+				onSuccess: () => {
+					this.lastRefreshed = new Date();
+				},
+				onError: e => {
+					if (this.$resources.list.data) {
+						this.$resources.list.data = [];
+					}
+				}
 			};
 		}
 	},
 	mounted() {
-		onDocUpdate(this.$socket, this.list.doctype, () => {
-			this.list.reload();
-		});
+		if (this.options.doctype) {
+			let doctype = this.options.doctype;
+			if (subscribed[doctype]) return;
+			this.$socket.emit('doctype_subscribe', doctype);
+			subscribed[doctype] = true;
+
+			this.$socket.on('list_update', data => {
+				let names = (this.list.data || []).map(d => d.name);
+				if (
+					data.doctype === doctype &&
+					names.includes(data.name) &&
+					// update list if last refreshed is more than 5 seconds ago
+					new Date() - this.lastRefreshed > 5000
+				) {
+					this.list.reload();
+				}
+			});
+		}
+	},
+	beforeUnmount() {
+		if (this.options.doctype) {
+			let doctype = this.options.doctype;
+			this.$socket.emit('doctype_unsubscribe', doctype);
+			subscribed[doctype] = false;
+		}
 	},
 	computed: {
 		list() {

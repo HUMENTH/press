@@ -1,9 +1,25 @@
 <template>
 	<div class="p-5" v-if="deploy">
-		<div>
-			<div class="flex items-center space-x-2">
+		<Button :route="{ name: `${object.doctype} Detail Deploys` }">
+			<template #prefix>
+				<i-lucide-arrow-left class="inline-block h-4 w-4" />
+			</template>
+			All deploys
+		</Button>
+
+		<div class="mt-3">
+			<div class="flex w-full items-center">
 				<h2 class="text-lg font-medium text-gray-900">{{ deploy.name }}</h2>
-				<Badge :label="deploy.status" />
+				<Badge class="ml-2" :label="deploy.status" />
+				<Button
+					class="ml-auto"
+					@click="$resources.deploy.reload()"
+					:loading="$resources.deploy.loading"
+				>
+					<template #icon>
+						<i-lucide-refresh-ccw class="h-4 w-4" />
+					</template>
+				</Button>
 			</div>
 			<div>
 				<div class="mt-4 grid grid-cols-5 gap-4">
@@ -51,9 +67,15 @@
 	</div>
 </template>
 <script>
+import { getObject } from '../objects';
+import JobStep from '../components/JobStep.vue';
+
 export default {
 	name: 'BenchDeploy',
-	props: ['id'],
+	props: ['id', 'objectType'],
+	components: {
+		JobStep
+	},
 	resources: {
 		deploy() {
 			return {
@@ -94,6 +116,9 @@ export default {
 	computed: {
 		deploy() {
 			return this.$resources.deploy.doc;
+		},
+		object() {
+			return getObject(this.objectType);
 		}
 	}
 };
